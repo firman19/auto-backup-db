@@ -11,6 +11,8 @@ Daily PostgreSQL/MySQL backups for multiple apps → gzip → Cloudflare R2 (rcl
 | `logs/db-backup.log` | Log file (rotated automatically) |
 | `tmp/` | Per-run scratch dirs, deleted after each run |
 
+> **Developer adding your app?** Jump to [Add your app's database](#add-your-apps-database-developer-guide).
+
 ## 1. Security first
 
 `/var/www` is normally a web root. Make sure no nginx/Apache vhost serves `/var/www` or this folder, and lock it down:
@@ -171,6 +173,121 @@ Restore into a scratch database first and check it before touching production.
 cd /var/www/auto-backup-db && sudo git pull
 ```
 `.env`, `config.json`, logs and `tmp/` are gitignored and untouched.
+
+## Add your app's database (developer guide)
+
+For developers who want their own app backed up by an already-installed copy of this tool (server setup in §2–5 done). You need: SSH access to the server, sudo, and your database's host/port/name.
+
+### Step 1: Pick your values
+| Decide | Example | Rule |
+|---|---|---|
+| App name | `shop-api` | Letters, digits, `.` `_` `-`; must be unique in `config.json`. It becomes the folder name in R2 |
+| DB type | `postgresql` or `mysql` | MariaDB counts as `mysql` |
+| Database name(s) | `shop_prod` | Same rule as app name |
+| Retention | `7` | Days to keep backups (whole number >= 1) |
+
+### Step 2: Create a read-only backup user
+Never reuse your app's login. Run as a DB admin.
+
+PostgreSQL (14+):
+```sql
+CREATE ROLE shop_backup LOGIN PASSWORD 'use-a-long-random-password';
+GRANT pg_read_all_data TO shop_backup;
+```
+Then allow it in `pg_hba.conf` (and reload: `sudo systemctl reload postgresql`):
+```
+host  shop_prod  shop_backup  127.0.0.1/32  scram-sha-256
+```
+
+MySQL / MariaDB:
+```sql
+CREATE USER 'shop_backup'@'127.0.0.1' IDENTIFIED BY 'use-a-long-random-password';
+GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT, PROCESS ON *.* TO 'shop_backup'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+### Step 3: Check the user can connect from the server
+```bash
+# PostgreSQL
+PGPASSWORD='your-password' psql -h 127.0.0.1 -U shop_backup -d shop_prod -c 'SELECT 1'
+# MySQL
+mysql -h 127.0.0.1 -u shop_backup -p shop_prod -e 'SELECT 1'
+```
+If this fails, fix it here first. The backup script uses the same connection.
+
+### Step 4: Add your app to `config.json`
+```bash
+cd /var/www/auto-backup-db
+sudo nano config.json
+```
+Append an object to the `apps` array (mind the comma after the previous one):
+```json
+{
+  "name": "shop-api",
+  "enabled": true,
+  "db_type": "postgresql",
+  "host": "127.0.0.1",
+  "port": 5432,
+  "user": "shop_backup",
+  "password": "use-a-long-random-password",
+  "databases": ["shop_prod"],
+  "retention_days": 7,
+  "extra_dump_args": []
+}
+```
+Defaults: PostgreSQL port `5432`, MySQL `3306`. Several databases for one app: `"databases": ["shop_prod", "shop_queue"]`.
+
+Check the JSON is valid and the file is still private:
+```bash
+jq . config.json > /dev/null && echo "JSON OK"
+sudo chmod 600 config.json
+```
+
+### Step 5: Dry-run your app only
+```bash
+sudo ./db-backup.sh --app shop-api --dry-run
+```
+Dumps locally but uploads and deletes nothing. Expect `Dump OK`, `Uploaded`, `RUN END ... failed=0`.
+
+### Step 6: Real run, then confirm in R2
+```bash
+sudo ./db-backup.sh --app shop-api
+set -a; . ./.env; set +a
+rclone ls "r2:$R2_BUCKET/db-backups/my-server/shop-api/"     # use your remote_base_path
+```
+You should see `shop_prod_YYYYmmdd-HHMMSS.sql.gz`. The daily cron job (§5) picks your app up automatically, so no cron changes are needed.
+
+### Step 7: Prove you can restore (do this once)
+Restore into a scratch database, never into production:
+```bash
+rclone cat "r2:$R2_BUCKET/db-backups/my-server/shop-api/shop_prod/<file>.sql.gz" | gunzip > /tmp/restore-test.sql
+# PostgreSQL
+sudo -u postgres createdb shop_restore_test && sudo -u postgres psql shop_restore_test < /tmp/restore-test.sql
+# MySQL
+mysql -u root -p -e 'CREATE DATABASE shop_restore_test' && mysql -u root -p shop_restore_test < /tmp/restore-test.sql
+# Clean up
+rm /tmp/restore-test.sql
+```
+Compare a few tables or row counts, then drop `shop_restore_test`.
+
+### Step 8: Check the logs after the first scheduled run
+```bash
+grep 'shop-api' logs/db-backup.log | tail -20
+grep 'RUN END' logs/db-backup.log | tail -3
+```
+`failed=0` means success. A failure shows as `[ERROR] [shop-api/shop_prod] ...` (dump and upload are retried automatically first).
+
+### Common mistakes
+| Problem | Cause / fix |
+|---|---|
+| `Invalid config ... name must match` | Illegal characters in `name` or a database name |
+| `jq: parse error` | Missing comma between app objects, or trailing comma after the last one |
+| `password authentication failed` / `Access denied` | Wrong password, or the user's host doesn't match (`127.0.0.1` vs `localhost`); redo Step 3 |
+| `no pg_hba.conf entry` | Add the line from Step 2 and reload PostgreSQL |
+| `server version mismatch` | Install a `postgresql-client` that matches the server's major version |
+| Backups from only some DBs | List every database in `databases`; the tool does not auto-discover them |
+| Need to pause an app | Set `"enabled": false` |
+| Backups are not deleted after N days | An app's old backups are pruned only after a fully successful run; fix the error in the log |
 
 ## Troubleshooting
 
