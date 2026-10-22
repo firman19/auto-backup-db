@@ -181,12 +181,12 @@ Use this guide to add your app's database to the backup tool already installed o
 **You need:** SSH access to the server with sudo. **Time:** about 10 minutes.
 
 ### Step 0: Open a root shell and set your values
-Every step below uses these variables, so stay in this same terminal session until you finish.
+This is **not a file**. Paste the block below into your SSH terminal, change the 4 values marked `EDIT`, then press Enter. These are temporary shell variables that every later step reads, so do all steps in this **same terminal window**. If you open a new one, run Step 0 again.
 ```bash
 sudo -i
 cd /var/www/auto-backup-db
 
-# ---- EDIT THESE 4 LINES ------------------------------------------------
+# ---- EDIT THESE 4 VALUES (in your terminal, before pressing Enter) -----
 APP="shop-api"           # your app name: letters, digits, . _ -  (becomes the R2 folder)
 DB_TYPE="postgresql"     # postgresql  or  mysql  (MariaDB = mysql)
 DB_NAMES="shop_prod"     # database name(s), space-separated: "shop_prod shop_queue"
