@@ -113,9 +113,9 @@ PostgreSQL must allow the user in `pg_hba.conf` for the given host (e.g. `host a
 ```bash
 cd /var/www/auto-backup-db
 
-# R2 reachable?
+# R2 reachable? (list the bucket itself; `rclone lsd r2:` returns 403 with a
+# bucket-scoped token because listing ALL buckets needs an account-level token)
 set -a; . ./.env; set +a
-rclone lsd r2:
 rclone lsf "r2:$R2_BUCKET"
 
 # Syntax check, then a dry run (dumps locally; rclone uploads/deletes nothing)
@@ -180,6 +180,8 @@ cd /var/www/auto-backup-db && sudo git pull
 | `bad interpreter: /usr/bin/env: 'bash\r'` | CRLF line endings: `sed -i 's/\r$//' db-backup.sh` |
 | `pg_dump: error: aborting because of server version mismatch` | Install a `postgresql-client` matching the server's major version |
 | R2 `403` / `AccessDenied` | Check the token has Object Read & Write on the bucket; keep `RCLONE_CONFIG_R2_NO_CHECK_BUCKET="true"` |
-| `Cannot reach r2:<bucket>` | Verify endpoint (`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`) and keys; test with `rclone lsd r2:` |
+| `rclone lsd r2:` → 403 `ListBuckets` Access Denied | Expected with a bucket-scoped token; test with `rclone lsf "r2:$R2_BUCKET"` instead |
+| `Cannot reach r2:<bucket>` | Verify endpoint (`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`), keys and `R2_BUCKET`; test with `rclone lsf "r2:$R2_BUCKET"` |
+| `NOTICE: Config file ... rclone.conf not found` | Harmless (remote comes from `.env`); `RCLONE_CONFIG="/dev/null"` in `.env` silences it |
 | MySQL `Access denied` / PostgreSQL `no pg_hba.conf entry` | Check the backup user's host and grants / `pg_hba.conf` |
 | `Another db-backup run is already in progress` | A previous run is still going; check `ps aux \| grep db-backup` |
