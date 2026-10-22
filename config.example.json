@@ -1,0 +1,42 @@
+{
+  "global": {
+    "remote": "r2",
+    "remote_base_path": "db-backups/my-server",
+    "tmp_dir": "./tmp",
+    "log_file": "./logs/db-backup.log",
+    "log_max_size_mb": 10,
+    "log_keep": 5,
+    "retry": {
+      "max_attempts": 3,
+      "delay_seconds": 30,
+      "backoff_multiplier": 2
+    },
+    "rclone_extra_args": ["--retries", "3", "--low-level-retries", "10"]
+  },
+  "apps": [
+    {
+      "name": "app-a",
+      "enabled": true,
+      "db_type": "postgresql",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "app_a_backup",
+      "password": "[Insert App A DB Password]",
+      "databases": ["app_a_prod"],
+      "retention_days": 3,
+      "extra_dump_args": []
+    },
+    {
+      "name": "app-b",
+      "enabled": true,
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "user": "app_b_backup",
+      "password": "[Insert App B DB Password]",
+      "databases": ["app_b_prod", "app_b_queue"],
+      "retention_days": 7,
+      "extra_dump_args": []
+    }
+  ]
+}

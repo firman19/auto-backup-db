@@ -1,0 +1,9 @@
+# Secrets and server-specific state: never commit
+.env
+config.json
+
+# Runtime output (keep the folders, ignore contents)
+logs/*
+!logs/.gitkeep
+tmp/*
+!tmp/.gitkeep
