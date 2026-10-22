@@ -176,149 +176,98 @@ cd /var/www/auto-backup-db && sudo git pull
 
 ## Add your app's database (developer guide)
 
-Use this guide to add your app's database to the backup tool already installed on the server. Set your values once in Step 0; after that, **every command is copy-paste**, with nothing to edit.
+### 1. SSH to the server
+```bash
+ssh <your-user>@<server-ip>
+```
 
-**You need:** SSH access to the server with sudo. **Time:** about 10 minutes.
-
-### Step 0: Open a root shell and set your values
-This is **not a file**. Paste the block below into your SSH terminal, change the 4 values marked `EDIT`, then press Enter. These are temporary shell variables that every later step reads, so do all steps in this **same terminal window**. If you open a new one, run Step 0 again.
+### 2. Go to the backup folder as root
 ```bash
 sudo -i
 cd /var/www/auto-backup-db
-
-# ---- EDIT THESE 4 VALUES (in your terminal, before pressing Enter) -----
-APP="shop-api"           # your app name: letters, digits, . _ -  (becomes the R2 folder)
-DB_TYPE="postgresql"     # postgresql  or  mysql  (MariaDB = mysql)
-DB_NAMES="shop_prod"     # database name(s), space-separated: "shop_prod shop_queue"
-RETENTION=7              # days to keep backups (whole number >= 1)
-# ------------------------------------------------------------------------
-
-DB_USER="${APP//[-.]/_}_backup"                   # e.g. shop_api_backup
-DB_PASS="$(openssl rand -hex 24)"                 # random, safe in SQL/JSON (no quotes)
-if [ "$DB_TYPE" = postgresql ]; then DB_PORT=5432; else DB_PORT=3306; fi
-echo "User: $DB_USER  Port: $DB_PORT  Password: $DB_PASS"
 ```
-> If your database listens on a non-default port, set `DB_PORT` yourself after this block. You don't need to save the password: it goes into `config.json` in Step 3.
 
-### Step 1: Create a read-only backup user
-Run the block that matches your `DB_TYPE`. Don't reuse your app's own login: this user can only read.
-
-**PostgreSQL** (14+). This block creates the user, allows it in `pg_hba.conf`, and reloads PostgreSQL:
+### 3. Add your app to `config.json`
 ```bash
-sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASS';" \
-                                         -c "GRANT pg_read_all_data TO $DB_USER;"
-HBA="$(sudo -u postgres psql -tAc 'SHOW hba_file')"
-for DB in $DB_NAMES; do
-  sed -i "1i host  $DB  $DB_USER  127.0.0.1/32  scram-sha-256" "$HBA"
-done
-systemctl reload postgresql
+nano config.json
 ```
-> The rule is inserted at the **top** of `pg_hba.conf`, because PostgreSQL uses the first matching line.
+Add a new object inside the `"apps": [ ... ]` list. Put a comma after the previous app's closing `}`.
 
-**MySQL / MariaDB:**
+**MySQL / MariaDB example:**
+```json
+{
+  "name": "sidak-prod",
+  "enabled": true,
+  "db_type": "mysql",
+  "host": "127.0.0.1",
+  "port": 3306,
+  "user": "sidak_user",
+  "password": "your-db-password",
+  "databases": ["alkes_prod"],
+  "retention_days": 3,
+  "extra_dump_args": ["--no-tablespaces"]
+}
+```
+
+**PostgreSQL example:**
+```json
+{
+  "name": "shop-api",
+  "enabled": true,
+  "db_type": "postgresql",
+  "host": "127.0.0.1",
+  "port": 5432,
+  "user": "shop_user",
+  "password": "your-db-password",
+  "databases": ["shop_prod"],
+  "retention_days": 7,
+  "extra_dump_args": []
+}
+```
+
+| Attribute | Required | Description |
+|---|---|---|
+| `name` | yes | Unique app name; only letters, digits, `.`, `_` and `-`. It becomes the folder name in R2: `<bucket>/<remote_base_path>/<name>/<database>/` |
+| `enabled` | no | `true` to back up (default), `false` to pause without deleting the entry |
+| `db_type` | yes | `"mysql"` (also for MariaDB) or `"postgresql"` |
+| `host` | yes | Database server address. Use `"127.0.0.1"` when the database runs on this server |
+| `port` | yes | Number, not text: `3306` for MySQL, `5432` for PostgreSQL |
+| `user` | yes | Database username. Your app's own DB user works; a dedicated read-only user is safer |
+| `password` | yes | That user's password. Use `""` for socket/peer auth with no password |
+| `databases` | yes | List of database names to back up, e.g. `["db_one", "db_two"]`. Each one becomes its own `.sql.gz` file |
+| `retention_days` | yes | Whole number >= 1. Backups in R2 older than this many days are deleted after a successful run |
+| `extra_dump_args` | no | Extra flags for `mysqldump` / `pg_dump`. For MySQL keep `["--no-tablespaces"]` unless the user has the `PROCESS` privilege. Use `[]` for none |
+| `os_user` | no | PostgreSQL only: run `pg_dump` as this Linux user (e.g. `"postgres"`) for peer auth |
+
+Save the file (`Ctrl+O`, `Enter`, `Ctrl+X`), then check that the JSON is valid and the file is still private:
 ```bash
-mysql -e "CREATE USER '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
-          GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT, PROCESS ON *.* TO '$DB_USER'@'127.0.0.1';
-          FLUSH PRIVILEGES;"
+jq . config.json > /dev/null && echo "JSON OK"
+chmod 600 config.json
 ```
-> If `mysql` says "Access denied for root", use `mysql -u root -p -e "..."` instead.
 
-### Step 2: Test the connection
-Every database should print `OK`:
+### 4. Dry run (dumps locally; uploads and deletes nothing)
 ```bash
-for DB in $DB_NAMES; do
-  if [ "$DB_TYPE" = postgresql ]; then
-    PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p "$DB_PORT" -U "$DB_USER" -d "$DB" -tAc 'SELECT 1' >/dev/null
-  else
-    MYSQL_PWD="$DB_PASS" mysql -h 127.0.0.1 -P "$DB_PORT" -u "$DB_USER" "$DB" -e 'SELECT 1' >/dev/null
-  fi && echo "$DB: OK" || echo "$DB: FAILED - see Common mistakes below"
-done
+./db-backup.sh --app sidak-prod --dry-run
 ```
-Don't continue until every database prints `OK`. The backup uses this exact connection.
+Expected: `Dump OK` for each database, then `RUN END ... failed=0`.
 
-### Step 3: Add your app to `config.json`
-This block adds your app safely, so you don't need to edit any JSON by hand. It keeps a backup copy, refuses duplicate app names, and keeps the file private.
+### 5. Run your app for real
 ```bash
-cp -p config.json "config.json.bak.$(date +%Y%m%d-%H%M%S)"
-if jq -e --arg n "$APP" 'any(.apps[]; .name == $n)' config.json >/dev/null; then
-  echo "ERROR: app '$APP' already exists in config.json"
-else
-  (umask 077; jq --arg name "$APP" --arg type "$DB_TYPE" --argjson port "$DB_PORT" \
-      --arg user "$DB_USER" --arg pass "$DB_PASS" --arg dbs "$DB_NAMES" --argjson days "$RETENTION" \
-      '.apps += [{name: $name, enabled: true, db_type: $type, host: "127.0.0.1", port: $port,
-                  user: $user, password: $pass, databases: ($dbs | split(" ") | map(select(. != ""))),
-                  retention_days: $days, extra_dump_args: []}]' \
-      config.json > config.json.new) && mv config.json.new config.json && echo "Added '$APP'"
-fi
-jq --arg n "$APP" '.apps[] | select(.name == $n) | .password = "***"' config.json
+./db-backup.sh --app sidak-prod
 ```
-Check that the printed entry looks right.
+Expected: `Uploaded ...` then `RUN END ... failed=0`. You don't need to change cron: the daily job backs up every enabled app automatically.
 
-### Step 4: Dry run (uploads and deletes nothing)
-```bash
-./db-backup.sh --app "$APP" --dry-run
-```
-Expected: one `Dump OK` per database, then `RUN END ... failed=0`.
+Check later with `grep sidak-prod logs/db-backup.log | tail`.
 
-### Step 5: Real backup, then confirm it is in R2
-```bash
-./db-backup.sh --app "$APP"
-
-set -a; . ./.env; set +a
-BASE="$(jq -r .global.remote_base_path config.json)"
-rclone ls "r2:$R2_BUCKET/$BASE/$APP/"
-```
-You should see one `<database>_YYYYmmdd-HHMMSS.sql.gz` per database. **You're now in the daily backup:** the existing cron job picks up every enabled app, so you don't need to change cron.
-
-### Step 6: Prove you can restore (do this once)
-This restores the newest backup of your **first** database into a throwaway database named `restore_test_<db>`. It never touches production.
-```bash
-DB="${DB_NAMES%% *}"; TEST_DB="restore_test_$DB"
-LATEST="$(rclone lsf "r2:$R2_BUCKET/$BASE/$APP/$DB/" | sort | tail -n 1)"
-echo "Restoring $LATEST into $TEST_DB"
-
-if [ "$DB_TYPE" = postgresql ]; then
-  sudo -u postgres createdb "$TEST_DB"
-  rclone cat "r2:$R2_BUCKET/$BASE/$APP/$DB/$LATEST" | gunzip | sudo -u postgres psql -q "$TEST_DB" >/dev/null
-  sudo -u postgres psql -d "$TEST_DB" -c '\dt+'
-else
-  mysql -e "CREATE DATABASE \`$TEST_DB\`"
-  rclone cat "r2:$R2_BUCKET/$BASE/$APP/$DB/$LATEST" | gunzip | mysql "$TEST_DB"
-  mysql -e "SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='$TEST_DB'"
-fi
-```
-Compare the tables and row counts with production. When it looks right, drop the test database:
-```bash
-if [ "$DB_TYPE" = postgresql ]; then sudo -u postgres dropdb "$TEST_DB"; else mysql -e "DROP DATABASE \`$TEST_DB\`"; fi
-```
-
-### Step 7: Check after the first scheduled run (next day)
-```bash
-cd /var/www/auto-backup-db
-grep "\[$APP" logs/db-backup.log | tail -20
-grep 'RUN END' logs/db-backup.log | tail -3
-```
-`failed=0` means everything worked. Errors look like `[ERROR] [shop-api/shop_prod] ...`. Dumps and uploads are retried automatically before an error is reported.
-
-### Changing or removing your app later
-| Task | Do this |
+### If something fails
+| Error | Fix |
 |---|---|
-| Change retention / add a database | `nano config.json`, edit your entry, then `jq . config.json >/dev/null && echo OK` |
-| Pause backups | Set `"enabled": false` in your entry |
-| Remove completely | Delete your entry from `apps` (existing backups in R2 stay until you delete them manually) |
-| Back up one app now | `./db-backup.sh --app <name>` |
-
-### Common mistakes
-| Symptom | Fix |
-|---|---|
-| Step 2 prints `FAILED` (PostgreSQL) | Make sure `systemctl reload postgresql` ran; check the top lines of `pg_hba.conf` |
-| Step 2 prints `FAILED` (MySQL) | MySQL treats `localhost` and `127.0.0.1` as different hosts: the user must be `'<user>'@'127.0.0.1'` |
-| `role ... already exists` / `Operation CREATE USER failed` | The user already exists. Reset its password to `$DB_PASS` (`ALTER ROLE` / `ALTER USER`), then continue from Step 2 |
-| `ERROR: app ... already exists` | Pick another `APP` name, or edit the existing entry |
-| `Invalid config ... name must match` | Only use letters, digits, `.`, `_` and `-` in `APP` and `DB_NAMES` |
+| `jq: parse error` | A comma is missing between app objects, or there is an extra comma after the last one |
+| `Invalid config ...` | The message names the wrong field; fix it in `config.json` |
+| `Access denied for user '...'@'localhost'` (MySQL) | Wrong password, or the user exists only for `127.0.0.1`. Test with `mysql -h 127.0.0.1 -u <user> -p <database> -e 'SELECT 1'` |
+| `you need ... the PROCESS privilege` | Add `"--no-tablespaces"` to `extra_dump_args` |
+| `password authentication failed` / `no pg_hba.conf entry` (PostgreSQL) | Wrong password, or `pg_hba.conf` doesn't allow this user from `127.0.0.1` |
 | `server version mismatch` | Install a `postgresql-client` that matches the server's major version |
-| Lost your variables (new terminal) | Re-run Step 0, but replace the `DB_PASS=` line with `DB_PASS="$(jq -r --arg n "$APP" '.apps[] \| select(.name == $n).password' config.json)"` |
-| Old backups are not deleted after N days | An app's old backups are pruned only after a fully successful run. Fix the error in the log first |
 
 ## Troubleshooting
 

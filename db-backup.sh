@@ -258,6 +258,8 @@ load_app() {
 }
 
 # MySQL: keep the password off the command line via a private option file.
+# It is passed with --defaults-file (not --defaults-extra-file) so no other option
+# file, e.g. /root/.my.cnf, can override the backup user's credentials.
 write_mysql_cnf() {
   local pw=${A_PASS//\\/\\\\}; pw=${pw//\"/\\\"}
   A_MYCNF="$WORK_DIR/mysql-$A_NAME.cnf"
@@ -291,7 +293,7 @@ dump_once() {
   else
     local -a gtid=()
     if mysqldump --help 2>/dev/null | grep -q -- '--set-gtid-purged'; then gtid=(--set-gtid-purged=OFF); fi
-    cmd+=(mysqldump "--defaults-extra-file=$A_MYCNF" --single-transaction --quick
+    cmd+=(mysqldump "--defaults-file=$A_MYCNF" --single-transaction --quick
           --routines --triggers --events --hex-blob "${gtid[@]}" "${A_EXTRA[@]}" "$db")
   fi
 
